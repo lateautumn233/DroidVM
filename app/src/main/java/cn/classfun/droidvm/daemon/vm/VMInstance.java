@@ -304,6 +304,11 @@ public final class VMInstance extends VMConfig {
         }
     }
 
+    public void clearLogs() {
+        for (var stream : getStreams())
+            stream.clear();
+    }
+
     private void runVM() {
         var inst = getBackendInstance();
         var vmId = getId().toString();
