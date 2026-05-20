@@ -122,6 +122,11 @@ public final class CrosvmBackendInstance extends VMBackendInstance {
         args.add(config.getName());
         args.add("--mem");
         args.add(String.valueOf(Math.max(item.optLong("memory_mb", 512), 64)));
+        var swiotlbMb = item.optLong("swiotlb_mb", 32);
+        if (swiotlbMb > 0) {
+            args.add("--swiotlb");
+            args.add(String.valueOf(swiotlbMb));
+        }
         args.add("--cpus");
         args.add(String.valueOf(Math.max(item.optLong("cpu_count", 1), 1)));
         switch (optEnum(item, "protected_vm", ProtectedVM.PROTECTED_WITHOUT_FIRMWARE)) {

@@ -153,6 +153,7 @@
     <string name="create_vm_category_basic">基本</string>
     <string name="create_vm_name_hint">名称</string>
     <string name="create_vm_memory_hint">内存</string>
+    <string name="create_vm_swiotlb">SWIOTLB (MiB)</string>
     <string name="create_vm_cpu_hint">CPU 数量</string>
     <string name="create_vm_backend">后端</string>
     <string name="create_vm_backend_crosvm">CrosVM</string>

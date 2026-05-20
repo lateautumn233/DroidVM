@@ -24,6 +24,7 @@ import cn.classfun.droidvm.ui.widgets.row.TextInputRowWidget;
 public final class VMEditBasicTab extends VMEditBaseTab {
     private TextInputRowWidget inputName;
     private TextInputRowWidget inputMemory;
+    private TextInputRowWidget inputSwiotlb;
     private TextInputRowWidget inputCpu;
     private SwitchRowWidget swBalloon;
     private SwitchRowWidget swPmu;
@@ -44,6 +45,7 @@ public final class VMEditBasicTab extends VMEditBaseTab {
     public void initView() {
         inputName = view.findViewById(R.id.input_name);
         inputMemory = view.findViewById(R.id.input_memory);
+        inputSwiotlb = view.findViewById(R.id.input_swiotlb);
         inputCpu = view.findViewById(R.id.input_cpu);
         swBalloon = view.findViewById(R.id.sw_balloon);
         swPmu = view.findViewById(R.id.sw_pmu);
@@ -60,6 +62,7 @@ public final class VMEditBasicTab extends VMEditBaseTab {
     @Override
     public void initValue() {
         inputMemory.setValue(512, SizeUnit.MB);
+        inputSwiotlb.setValue(32);
         inputCpu.setValue(1);
         chooseProtectedVm.configure(ProtectedVM.class, PROTECTED_WITHOUT_FIRMWARE);
         chooseBackend.configure(VMBackend.class, VMBackend.CROSVM);
@@ -70,6 +73,7 @@ public final class VMEditBasicTab extends VMEditBaseTab {
         var item = config.item;
         inputName.setText(config.getName());
         inputMemory.setValue(item.optLong("memory_mb", 512), SizeUnit.MB);
+        inputSwiotlb.setValue(item.optLong("swiotlb_mb", 32));
         inputCpu.setValue(item.optLong("cpu_count", 1));
         swBalloon.setChecked(item.optBoolean("balloon", false));
         swPmu.setChecked(item.optBoolean("pmu", false));
@@ -131,10 +135,26 @@ public final class VMEditBasicTab extends VMEditBaseTab {
         return true;
     }
 
+    private boolean validateInputSwiotlb(@NonNull VMStore ignored) {
+        inputSwiotlb.setError(null);
+        if (!inputSwiotlb.isInputValid()) {
+            inputSwiotlb.setError(parent.getString(R.string.create_vm_error_invalid_number));
+            return false;
+        }
+        try {
+            inputSwiotlb.getValue();
+        } catch (Exception ignored2) {
+            inputSwiotlb.setError(parent.getString(R.string.create_vm_error_invalid_number));
+            return false;
+        }
+        return true;
+    }
+
     @Override
     public boolean validateInput(@NonNull VMStore store) {
         if (!validateInputName(store)) return false;
         if (!validateInputMemory(store)) return false;
+        if (!validateInputSwiotlb(store)) return false;
         if (!validateInputCpu(store)) return false;
         return true;
     }
@@ -144,6 +164,7 @@ public final class VMEditBasicTab extends VMEditBaseTab {
         var item = config.item;
         config.setName(inputName.getText());
         item.set("memory_mb", inputMemory.getValue(SizeUnit.MB));
+        item.set("swiotlb_mb", inputSwiotlb.getValue());
         item.set("cpu_count", inputCpu.getValue());
         item.set("balloon", swBalloon.isChecked());
         item.set("pmu", swPmu.isChecked());

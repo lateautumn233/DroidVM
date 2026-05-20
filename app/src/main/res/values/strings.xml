@@ -155,6 +155,7 @@
     <string name="create_vm_category_basic">Basic</string>
     <string name="create_vm_name_hint">Name</string>
     <string name="create_vm_memory_hint">Memory</string>
+    <string name="create_vm_swiotlb">SWIOTLB (MiB)</string>
     <string name="create_vm_cpu_hint">CPU Count</string>
     <string name="create_vm_backend">Backend</string>
     <string name="create_vm_backend_crosvm">CrosVM</string>

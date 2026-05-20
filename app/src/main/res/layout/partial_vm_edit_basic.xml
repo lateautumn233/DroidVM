@@ -31,6 +31,17 @@
             app:ti_precision="1MiB" />
 
         <cn.classfun.droidvm.ui.widgets.row.TextInputRowWidget
+            android:id="@+id/input_swiotlb"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/create_vm_swiotlb"
+            android:icon="@drawable/ic_memory"
+            android:inputType="number"
+            app:ti_max="65536"
+            app:ti_min="0"
+            app:ti_mode="number" />
+
+        <cn.classfun.droidvm.ui.widgets.row.TextInputRowWidget
             android:id="@+id/input_cpu"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
