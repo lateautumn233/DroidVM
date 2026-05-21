@@ -60,6 +60,18 @@ public final class AgentOperationActivity extends AppCompatActivity
     private String vmId = null;
     private AgentVM agentVM = null;
     private BaseAction action = null;
+    private final StringBuilder pendingLog = new StringBuilder();
+    private boolean flushScheduled = false;
+    private final Runnable flushLogRunnable = () -> {
+        String text;
+        synchronized (pendingLog) {
+            flushScheduled = false;
+            if (pendingLog.length() == 0) return;
+            text = pendingLog.toString();
+            pendingLog.setLength(0);
+        }
+        appendLog(text);
+    };
 
     private final SimpleTerminalSessionClient sessionClient = new SimpleTerminalSessionClient() {
         @Override
@@ -151,6 +163,15 @@ public final class AgentOperationActivity extends AppCompatActivity
         terminalView.attachSession(terminalSession);
     }
 
+    private void scheduleAppendLog(@NonNull String text) {
+        synchronized (pendingLog) {
+            pendingLog.append(text);
+            if (flushScheduled) return;
+            flushScheduled = true;
+        }
+        mainHandler.postDelayed(flushLogRunnable, 16);
+    }
+
     private void appendLog(@NonNull String text) {
         if (terminalSession == null) return;
         var emulator = terminalSession.getEmulator();
@@ -238,7 +259,7 @@ public final class AgentOperationActivity extends AppCompatActivity
             var text = URLDecoder.decode(data.optString("data", ""), StandardCharsets.UTF_8);
             var stream = data.optString("stream", "");
             if (!text.isEmpty() && (stream.equals("stdio") || stream.equals("uart")))
-                mainHandler.post(() -> appendLog(text));
+                scheduleAppendLog(text);
         } else if (event.equals("exited")) {
             int exitCode = data.optInt("exit_code", -1);
             mainHandler.post(() -> onVMFinished(exitCode));

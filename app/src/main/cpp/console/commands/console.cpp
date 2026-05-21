@@ -73,6 +73,42 @@ static void clear_read_buffer(int fd) {
     if (fl >= 0) fcntl(fd, F_SETFL, fl);
 }
 
+static bool is_digit(char ch) {
+    return ch >= '0' && ch <= '9';
+}
+
+static bool is_cursor_position_report(const char *buf, ssize_t len, ssize_t pos, ssize_t &end) {
+    ssize_t i = pos;
+    if (i + 2 >= len || buf[i] != '\033' || buf[i + 1] != '[')
+        return false;
+    i += 2;
+    ssize_t row_start = i;
+    while (i < len && is_digit(buf[i])) i++;
+    if (i == row_start || i >= len || buf[i] != ';')
+        return false;
+    i++;
+    ssize_t col_start = i;
+    while (i < len && is_digit(buf[i])) i++;
+    if (i == col_start || i >= len || buf[i] != 'R')
+        return false;
+    end = i + 1;
+    return true;
+}
+
+static std::string filter_cursor_position_reports(const char *buf, ssize_t len) {
+    std::string out;
+    out.reserve(len);
+    for (ssize_t i = 0; i < len;) {
+        ssize_t end = 0;
+        if (is_cursor_position_report(buf, len, i, end)) {
+            i = end;
+            continue;
+        }
+        out.push_back(buf[i++]);
+    }
+    return out;
+}
+
 void ConsoleCommand::process_event(
     const Json::Value &msg,
     const std::string &filter_vm,
@@ -255,11 +291,16 @@ void ConsoleCommand::console_attach(
                         warned = true;
                     }
                 } else {
+                    auto input = is_raw
+                        ? filter_cursor_position_reports(buf, n)
+                        : std::string(buf, n);
+                    if (input.empty())
+                        continue;
                     Json::Value write_req;
                     write_req["command"] = "vm_console_write";
                     write_req["vm_id"] = filter_vm;
                     write_req["stream"] = stream;
-                    write_req["data"] = std::string(buf, n);
+                    write_req["data"] = input;
                     ipc->send_request(write_req);
                 }
             }
