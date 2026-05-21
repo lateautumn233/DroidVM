@@ -69,8 +69,8 @@ public final class VMConsoleActivity extends AppCompatActivity
     private int lastImePadding = 0;
     private ActivityResultLauncher<String> saveLogLauncher;
     private WebView terminalView;
-    private boolean ctrlDown = false;
-    private boolean altDown = false;
+    private volatile boolean ctrlDown = false;
+    private volatile boolean altDown = false;
     private boolean terminalReady = false;
     public String vmId;
     public String vmName;
@@ -326,6 +326,36 @@ public final class VMConsoleActivity extends AppCompatActivity
         evaluateTerminal("input", data);
     }
 
+    private String applyModifiers(@NonNull String data) {
+        if (!ctrlDown && !altDown) return data;
+        int cp = data.codePointAt(0);
+        int cpLen = Character.charCount(cp);
+        StringBuilder sb = new StringBuilder(data.length() + 1);
+        if (altDown) sb.append((char) 0x1b);
+        if (ctrlDown) {
+            sb.append(toCtrlChar(cp));
+        } else {
+            sb.appendCodePoint(cp);
+        }
+        sb.append(data, cpLen, data.length());
+        ctrlDown = false;
+        altDown = false;
+        mainHandler.post(this::updateToggleButtons);
+        return sb.toString();
+    }
+
+    private static char toCtrlChar(int cp) {
+        if (cp >= 'a' && cp <= 'z') return (char) (cp - 'a' + 1);
+        if (cp >= 'A' && cp <= 'Z') return (char) (cp - 'A' + 1);
+        if (cp == ' ' || cp == '@') return 0;
+        if (cp == '[') return 0x1b;
+        if (cp == '\\') return 0x1c;
+        if (cp == ']') return 0x1d;
+        if (cp == '^') return 0x1e;
+        if (cp == '_' || cp == '?') return 0x1f;
+        return (char) cp;
+    }
+
     private void updateToggleButtons() {
         setToggleStyle(findViewById(R.id.btn_ctrl), ctrlDown);
         setToggleStyle(findViewById(R.id.btn_alt), altDown);
@@ -436,7 +466,9 @@ public final class VMConsoleActivity extends AppCompatActivity
 
         @JavascriptInterface
         public void onData(String data) {
-            if (data != null) sendInput(data);
+            if (data == null || data.isEmpty()) return;
+            String out = applyModifiers(data);
+            if (!out.isEmpty()) sendInput(out);
         }
 
         @JavascriptInterface
