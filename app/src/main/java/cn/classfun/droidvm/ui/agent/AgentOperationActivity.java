@@ -50,6 +50,7 @@ import cn.classfun.droidvm.lib.daemon.ForegroundCallback;
 import cn.classfun.droidvm.lib.store.disk.DiskStore;
 import cn.classfun.droidvm.ui.agent.base.AgentVM;
 import cn.classfun.droidvm.ui.agent.base.BaseAction;
+import cn.classfun.droidvm.ui.vm.console.TerminalPrefs;
 
 public final class AgentOperationActivity extends AppCompatActivity
     implements DaemonConnection.EventListener, ForegroundCallback {
@@ -82,6 +83,7 @@ public final class AgentOperationActivity extends AppCompatActivity
     private MaterialButton btnCancel;
     private MaterialToolbar toolbar;
     private boolean terminalReady = false;
+    private int savedFontSize = TerminalPrefs.DEFAULT_FONT_SIZE;
     private boolean finished = false;
     private String vmId = null;
     private AgentVM agentVM = null;
@@ -273,6 +275,21 @@ public final class AgentOperationActivity extends AppCompatActivity
                 method, JSONObject.quote(arg)
             );
         terminalView.evaluateJavascript(js, null);
+    }
+
+    private void evaluateTerminalNumber(@NonNull String method, int arg) {
+        if (terminalView == null) return;
+        var js = fmt(
+            "window.DroidVMTerminal && window.DroidVMTerminal.%s(%d);",
+            method, arg
+        );
+        terminalView.evaluateJavascript(js, null);
+    }
+
+    private void applySavedFontSize() {
+        int size = TerminalPrefs.getFontSize(this);
+        savedFontSize = size;
+        evaluateTerminalNumber("setFontSize", size);
     }
 
     private void startAgent() {
@@ -503,6 +520,7 @@ public final class AgentOperationActivity extends AppCompatActivity
         public void onReady() {
             mainHandler.post(() -> {
                 terminalReady = true;
+                applySavedFontSize();
                 flushPendingOutput();
                 mainHandler.postDelayed(fitRunnable, 50);
             });
@@ -511,6 +529,14 @@ public final class AgentOperationActivity extends AppCompatActivity
         @JavascriptInterface
         public void onResize(int cols, int rows) {
             Log.d(TAG, fmt("Terminal resized to %dx%d", cols, rows));
+        }
+
+        @JavascriptInterface
+        public void onFontSize(int size) {
+            if (size <= 0) return;
+            if (size == savedFontSize) return;
+            savedFontSize = size;
+            TerminalPrefs.setFontSize(AgentOperationActivity.this, size);
         }
     }
 }

@@ -72,6 +72,7 @@ public final class VMConsoleActivity extends AppCompatActivity
     private volatile boolean ctrlDown = false;
     private volatile boolean altDown = false;
     private boolean terminalReady = false;
+    private int savedFontSize = TerminalPrefs.DEFAULT_FONT_SIZE;
     public String vmId;
     public String vmName;
     public String streamName;
@@ -181,6 +182,12 @@ public final class VMConsoleActivity extends AppCompatActivity
         focusTerminal();
     }
 
+    private void applySavedFontSize() {
+        int size = TerminalPrefs.getFontSize(this);
+        savedFontSize = size;
+        evaluateTerminalNumber("setFontSize", size);
+    }
+
     private void focusTerminal() {
         if (terminalView == null) return;
         terminalView.requestFocus();
@@ -287,6 +294,15 @@ public final class VMConsoleActivity extends AppCompatActivity
                 "window.DroidVMTerminal && window.DroidVMTerminal.%s(%s);",
                 method, JSONObject.quote(arg)
             );
+        terminalView.evaluateJavascript(js, null);
+    }
+
+    private void evaluateTerminalNumber(@NonNull String method, int arg) {
+        if (terminalView == null) return;
+        var js = fmt(
+            "window.DroidVMTerminal && window.DroidVMTerminal.%s(%d);",
+            method, arg
+        );
         terminalView.evaluateJavascript(js, null);
     }
 
@@ -458,6 +474,7 @@ public final class VMConsoleActivity extends AppCompatActivity
         public void onReady() {
             mainHandler.post(() -> {
                 terminalReady = true;
+                applySavedFontSize();
                 flushPendingOutput();
                 focusTerminal();
                 mainHandler.postDelayed(fitRunnable, 50);
@@ -474,6 +491,14 @@ public final class VMConsoleActivity extends AppCompatActivity
         @JavascriptInterface
         public void onResize(int cols, int rows) {
             Log.d(TAG, fmt("Terminal resized to %dx%d", cols, rows));
+        }
+
+        @JavascriptInterface
+        public void onFontSize(int size) {
+            if (size <= 0) return;
+            if (size == savedFontSize) return;
+            savedFontSize = size;
+            TerminalPrefs.setFontSize(VMConsoleActivity.this, size);
         }
     }
 }

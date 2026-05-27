@@ -101,6 +101,28 @@
 
     const MIN_FONT = 8;
     const MAX_FONT = 32;
+
+    function clampFont(size) {
+        if (!isFinite(size)) return term.options.fontSize;
+        size = Math.round(size);
+        if (size < MIN_FONT) size = MIN_FONT;
+        if (size > MAX_FONT) size = MAX_FONT;
+        return size;
+    }
+
+    function setFont(size) {
+        size = clampFont(size);
+        if (size === term.options.fontSize) return false;
+        term.options.fontSize = size;
+        scheduleFit(0);
+        return true;
+    }
+
+    function reportFont() {
+        if (window.DroidVMConsole && window.DroidVMConsole.onFontSize) {
+            window.DroidVMConsole.onFontSize(term.options.fontSize);
+        }
+    }
     let touchMode = null;
     let panAccumY = 0;
     let panLastY = 0;
@@ -138,13 +160,7 @@
         if (touchMode === 'pinch' && e.touches.length === 2) {
             const dist = distance(e.touches[0], e.touches[1]);
             if (pinchStartDist > 0) {
-                let newSize = Math.round(pinchStartFont * (dist / pinchStartDist));
-                if (newSize < MIN_FONT) newSize = MIN_FONT;
-                if (newSize > MAX_FONT) newSize = MAX_FONT;
-                if (newSize !== term.options.fontSize) {
-                    term.options.fontSize = newSize;
-                    scheduleFit(0);
-                }
+                setFont(pinchStartFont * (dist / pinchStartDist));
             }
             e.preventDefault();
         } else if (touchMode === 'pan' && e.touches.length === 1) {
@@ -165,11 +181,15 @@
     }, { passive: false, capture: true });
 
     function endTouch(e) {
+        const wasPinch = touchMode === 'pinch';
+        const pinchChanged = wasPinch && term.options.fontSize !== pinchStartFont;
         if (e.touches.length === 0) {
+            if (pinchChanged) reportFont();
             touchMode = null;
             panAccumY = 0;
             pinchStartDist = 0;
-        } else if (e.touches.length === 1 && touchMode === 'pinch') {
+        } else if (e.touches.length === 1 && wasPinch) {
+            if (pinchChanged) reportFont();
             touchMode = 'pan';
             panLastY = e.touches[0].clientY;
             panAccumY = 0;
@@ -195,7 +215,10 @@
         focus: function () {
             term.focus();
         },
-        fit: function () { scheduleFit(0); }
+        fit: function () { scheduleFit(0); },
+        setFontSize: function (size) {
+            setFont(size);
+        }
     };
 
     if (window.DroidVMConsole) {
