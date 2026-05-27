@@ -2,10 +2,10 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/agent_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@android:color/black"
-    android:fitsSystemWindows="true"
     android:orientation="vertical"
     tools:context=".ui.agent.AgentOperationActivity">
 
@@ -81,11 +81,11 @@
             android:textColor="#FF6B6B" />
     </LinearLayout>
 
-    <com.termux.view.TerminalView
+    <WebView
         android:id="@+id/terminal_view"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_margin="8dp"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:background="@android:color/black" />
 
 </LinearLayout>

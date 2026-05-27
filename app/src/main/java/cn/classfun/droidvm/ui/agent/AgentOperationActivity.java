@@ -2,31 +2,41 @@ package cn.classfun.droidvm.ui.agent;
 
 import static android.view.View.GONE;
 import static android.view.View.VISIBLE;
-import static cn.classfun.droidvm.lib.utils.FileUtils.findExecute;
-import static cn.classfun.droidvm.lib.utils.ProcessUtils.SIGHUP;
-import static cn.classfun.droidvm.lib.utils.ProcessUtils.shellKillProcess;
 import static cn.classfun.droidvm.lib.utils.StringUtils.fmt;
 import static cn.classfun.droidvm.lib.utils.ThreadUtils.runOnPool;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.view.View;
+import android.view.ViewTreeObserver;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import com.google.android.material.appbar.MaterialToolbar;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
-import com.termux.terminal.TerminalSession;
-import com.termux.view.TerminalView;
 
 import org.json.JSONObject;
 
@@ -38,8 +48,6 @@ import cn.classfun.droidvm.R;
 import cn.classfun.droidvm.lib.daemon.DaemonConnection;
 import cn.classfun.droidvm.lib.daemon.ForegroundCallback;
 import cn.classfun.droidvm.lib.store.disk.DiskStore;
-import cn.classfun.droidvm.lib.ui.termux.SimpleTerminalSessionClient;
-import cn.classfun.droidvm.lib.ui.termux.SimpleTerminalViewClient;
 import cn.classfun.droidvm.ui.agent.base.AgentVM;
 import cn.classfun.droidvm.ui.agent.base.BaseAction;
 
@@ -47,19 +55,11 @@ public final class AgentOperationActivity extends AppCompatActivity
     implements DaemonConnection.EventListener, ForegroundCallback {
     private static final String TAG = "AgentOperationActivity";
     public static final String EXTRA_AGENT_VM_JSON = "agent_vm_json";
+    private static final String TERMINAL_URL = "file:///android_asset/terminal/index.html";
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private ProgressBar progressSpinner;
-    private ImageView ivStatus;
-    private TextView tvTitle;
-    private TextView tvStatus;
-    private TerminalView terminalView;
-    private TerminalSession terminalSession;
-    private MaterialButton btnCancel;
-    private MaterialToolbar toolbar;
-    private boolean finished = false;
-    private String vmId = null;
-    private AgentVM agentVM = null;
-    private BaseAction action = null;
+    private final StringBuilder pendingOutput = new StringBuilder();
+    private final Runnable fitRunnable = () -> evaluateTerminal("fit");
+    private final Rect tmpRect = new Rect();
     private final StringBuilder pendingLog = new StringBuilder();
     private boolean flushScheduled = false;
     private final Runnable flushLogRunnable = () -> {
@@ -70,20 +70,22 @@ public final class AgentOperationActivity extends AppCompatActivity
             text = pendingLog.toString();
             pendingLog.setLength(0);
         }
-        appendLog(text);
+        appendTerminal(text);
     };
-
-    private final SimpleTerminalSessionClient sessionClient = new SimpleTerminalSessionClient() {
-        @Override
-        public void onTextChanged(@NonNull TerminalSession s) {
-            mainHandler.post(() -> {
-                if (terminalView != null) terminalView.onScreenUpdated();
-            });
-        }
-    };
-
-    private final SimpleTerminalViewClient viewClient = new SimpleTerminalViewClient() {
-    };
+    private View agentRoot;
+    private int lastImePadding = 0;
+    private ProgressBar progressSpinner;
+    private ImageView ivStatus;
+    private TextView tvTitle;
+    private TextView tvStatus;
+    private WebView terminalView;
+    private MaterialButton btnCancel;
+    private MaterialToolbar toolbar;
+    private boolean terminalReady = false;
+    private boolean finished = false;
+    private String vmId = null;
+    private AgentVM agentVM = null;
+    private BaseAction action = null;
 
     @NonNull
     public static Intent createIntent(
@@ -102,6 +104,7 @@ public final class AgentOperationActivity extends AppCompatActivity
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         setContentView(R.layout.activity_agent_operation);
         toolbar = findViewById(R.id.toolbar);
         progressSpinner = findViewById(R.id.progress_spinner);
@@ -111,7 +114,83 @@ public final class AgentOperationActivity extends AppCompatActivity
         terminalView = findViewById(R.id.terminal_view);
         btnCancel = findViewById(R.id.btn_cancel);
         btnCancel.setOnClickListener(v -> confirmCancel());
+        setupWindowInsets();
+        setupTerminalView();
         initialize();
+    }
+
+    private void setupWindowInsets() {
+        agentRoot = findViewById(R.id.agent_root);
+        ViewCompat.setOnApplyWindowInsetsListener(agentRoot, (v, insets) -> {
+            Insets bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+            );
+            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+            int bottom = Math.max(bars.bottom, ime.bottom);
+            v.setPadding(bars.left, bars.top, bars.right, bottom);
+            lastImePadding = ime.bottom;
+            return WindowInsetsCompat.CONSUMED;
+        });
+        agentRoot.getViewTreeObserver().addOnGlobalLayoutListener(globalLayoutListener);
+        agentRoot.post(() -> ViewCompat.requestApplyInsets(agentRoot));
+    }
+
+    private final ViewTreeObserver.OnGlobalLayoutListener globalLayoutListener = () -> {
+        if (agentRoot == null) return;
+        View decor = getWindow().getDecorView();
+        decor.getWindowVisibleDisplayFrame(tmpRect);
+        int imeHeight = Math.max(0, decor.getHeight() - tmpRect.bottom);
+        if (Math.abs(imeHeight - lastImePadding) < 80) return;
+        int currentBottom = agentRoot.getPaddingBottom();
+        int barsBottom = Math.max(0, currentBottom - lastImePadding);
+        int newBottom = Math.max(barsBottom, imeHeight);
+        if (newBottom == currentBottom) return;
+        agentRoot.setPadding(
+            agentRoot.getPaddingLeft(),
+            agentRoot.getPaddingTop(),
+            agentRoot.getPaddingRight(),
+            newBottom
+        );
+        lastImePadding = imeHeight;
+    };
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private void setupTerminalView() {
+        WebSettings settings = terminalView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setLoadWithOverviewMode(false);
+        terminalView.setBackgroundColor(getColor(android.R.color.black));
+        terminalView.addJavascriptInterface(new ConsoleBridge(), "DroidVMConsole");
+        terminalView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return !TERMINAL_URL.equals(request.getUrl().toString());
+            }
+
+            @Nullable
+            @Override
+            public WebResourceResponse shouldInterceptRequest(
+                WebView view,
+                WebResourceRequest request
+            ) {
+                var url = request.getUrl().toString();
+                if (url.startsWith("file:///android_asset/terminal/")) return null;
+                if (url.equals("about:blank")) return null;
+                return new WebResourceResponse("text/plain", "UTF-8", null);
+            }
+        });
+        terminalView.addOnLayoutChangeListener(
+            (v, l, t, r, b, ol, ot, or, ob) -> {
+                if (r - l == or - ol && b - t == ob - ot) return;
+                mainHandler.removeCallbacks(fitRunnable);
+                mainHandler.postDelayed(fitRunnable, 80);
+            }
+        );
+        terminalView.loadUrl(TERMINAL_URL);
     }
 
     private void initialize() {
@@ -140,27 +219,10 @@ public final class AgentOperationActivity extends AppCompatActivity
             finish();
             return;
         }
-        terminalView.setTerminalViewClient(viewClient);
-        initTerminal();
         tvTitle.setText(R.string.agent_operation_title);
         tvStatus.setText(R.string.agent_operation_preparing);
-        appendLog(getString(R.string.agent_operation_log_preparing));
+        appendTerminal(getString(R.string.agent_operation_log_preparing));
         runOnPool(this::startAgent);
-    }
-
-    private void initTerminal() {
-        var shell = findExecute("sh");
-        var cwd = getFilesDir().getAbsolutePath();
-        var args = new String[]{"sh", "-c", "while true; do sleep 86400; done"};
-        var env = new String[]{
-            "TERM=xterm-256color",
-            "PATH=/system/bin",
-            fmt("HOME=%s", cwd),
-        };
-        terminalSession = new TerminalSession(shell, cwd, args, env, null, sessionClient);
-        float density = getResources().getDisplayMetrics().density;
-        terminalView.setTextSize((int) (4 * density));
-        terminalView.attachSession(terminalSession);
     }
 
     private void scheduleAppendLog(@NonNull String text) {
@@ -172,15 +234,45 @@ public final class AgentOperationActivity extends AppCompatActivity
         mainHandler.postDelayed(flushLogRunnable, 16);
     }
 
-    private void appendLog(@NonNull String text) {
-        if (terminalSession == null) return;
-        var emulator = terminalSession.getEmulator();
-        if (emulator == null) return;
+    private void appendTerminal(@NonNull String data) {
+        if (data.isEmpty()) return;
+        String text = data;
         if (text.contains("\n") && !text.contains("\r"))
             text = text.replace("\n", "\r\n");
-        var bytes = text.getBytes(StandardCharsets.UTF_8);
-        emulator.append(bytes, bytes.length);
-        terminalView.onScreenUpdated();
+        final String finalText = text;
+        mainHandler.post(() -> {
+            if (!terminalReady || terminalView == null) {
+                pendingOutput.append(finalText);
+                return;
+            }
+            writeTerminal(finalText);
+        });
+    }
+
+    private void flushPendingOutput() {
+        if (pendingOutput.length() == 0) return;
+        var data = pendingOutput.toString();
+        pendingOutput.setLength(0);
+        writeTerminal(data);
+    }
+
+    private void writeTerminal(@NonNull String data) {
+        evaluateTerminal("write", data);
+    }
+
+    private void evaluateTerminal(@NonNull String method) {
+        evaluateTerminal(method, null);
+    }
+
+    private void evaluateTerminal(@NonNull String method, @Nullable String arg) {
+        if (terminalView == null) return;
+        var js = arg == null
+            ? fmt("window.DroidVMTerminal && window.DroidVMTerminal.%s();", method)
+            : fmt(
+                "window.DroidVMTerminal && window.DroidVMTerminal.%s(%s);",
+                method, JSONObject.quote(arg)
+            );
+        terminalView.evaluateJavascript(js, null);
     }
 
     private void startAgent() {
@@ -193,7 +285,7 @@ public final class AgentOperationActivity extends AppCompatActivity
         }
         runOnUiThread(() -> {
             tvStatus.setText(R.string.agent_operation_creating_vm);
-            appendLog(getString(R.string.agent_operation_log_creating_vm));
+            appendTerminal(getString(R.string.agent_operation_log_creating_vm));
         });
         var vmConfig = agentVM.buildVM();
         var conn = DaemonConnection.getInstance();
@@ -211,7 +303,7 @@ public final class AgentOperationActivity extends AppCompatActivity
             if (vmId.isEmpty()) throw new RuntimeException("vm_create returned empty vm_id");
             runOnUiThread(() -> {
                 tvStatus.setText(R.string.agent_operation_starting_vm);
-                appendLog(getString(R.string.agent_operation_log_starting_vm));
+                appendTerminal(getString(R.string.agent_operation_log_starting_vm));
             });
             var startReq = new JSONObject();
             startReq.put("command", "vm_start");
@@ -223,7 +315,7 @@ public final class AgentOperationActivity extends AppCompatActivity
             }
             runOnUiThread(() -> {
                 tvStatus.setText(R.string.agent_operation_running);
-                appendLog(getString(R.string.agent_operation_log_running));
+                appendTerminal(getString(R.string.agent_operation_log_running));
             });
         } catch (Exception e) {
             Log.e(TAG, "Failed to create/start agent VM", e);
@@ -256,10 +348,10 @@ public final class AgentOperationActivity extends AppCompatActivity
         if (!eventVmId.equals(vmId)) return;
         var event = data.optString("event", "");
         if (event.equals("output")) {
-            var text = URLDecoder.decode(data.optString("data", ""), StandardCharsets.UTF_8);
             var stream = data.optString("stream", "");
-            if (!text.isEmpty() && (stream.equals("stdio") || stream.equals("uart")))
-                scheduleAppendLog(text);
+            if (!stream.equals("uart")) return;
+            var text = URLDecoder.decode(data.optString("data", ""), StandardCharsets.UTF_8);
+            if (!text.isEmpty()) scheduleAppendLog(text);
         } else if (event.equals("exited")) {
             int exitCode = data.optInt("exit_code", -1);
             mainHandler.post(() -> onVMFinished(exitCode));
@@ -280,7 +372,7 @@ public final class AgentOperationActivity extends AppCompatActivity
     private void onVMFinished(int exitCode) {
         if (finished) return;
         finished = true;
-        appendLog(fmt(
+        appendTerminal(fmt(
             "\n--- %s (exit code: %d) ---\n",
             getString(R.string.agent_operation_vm_exited), exitCode
         ));
@@ -296,7 +388,6 @@ public final class AgentOperationActivity extends AppCompatActivity
                 Log.e(TAG, "Agent result check failed", e);
                 resultMessage = e.getMessage();
             }
-            killTerminalSession();
             cleanupVM();
             final boolean finalSuccess = success;
             final String finalMsg = resultMessage;
@@ -308,7 +399,7 @@ public final class AgentOperationActivity extends AppCompatActivity
                 if (finalSuccess) {
                     ivStatus.setImageResource(R.drawable.ic_large_success);
                     tvStatus.setText(R.string.agent_operation_success);
-                    appendLog(getString(R.string.agent_operation_log_success));
+                    appendTerminal(getString(R.string.agent_operation_log_success));
                 } else {
                     ivStatus.setImageResource(R.drawable.ic_large_error);
                     if (finalMsg != null) {
@@ -316,21 +407,10 @@ public final class AgentOperationActivity extends AppCompatActivity
                     } else {
                         tvStatus.setText(getString(R.string.agent_operation_failed, exitCode));
                     }
-                    appendLog(getString(R.string.agent_operation_log_failed));
+                    appendTerminal(getString(R.string.agent_operation_log_failed));
                 }
             });
         });
-    }
-
-    private void killTerminalSession() {
-        if (terminalSession != null) {
-            try {
-                if (terminalSession.isRunning())
-                    shellKillProcess(terminalSession.getPid(), SIGHUP);
-            } catch (Exception ignored) {
-            }
-            terminalSession = null;
-        }
     }
 
     private void cleanupVM() {
@@ -376,10 +456,7 @@ public final class AgentOperationActivity extends AppCompatActivity
             .setMessage(R.string.agent_operation_cancel_message)
             .setPositiveButton(android.R.string.ok, (d, w) -> {
                 finished = true;
-                runOnPool(() -> {
-                    killTerminalSession();
-                    cleanupVM();
-                });
+                runOnPool(this::cleanupVM);
                 finish();
             })
             .setNegativeButton(android.R.string.cancel, null)
@@ -396,10 +473,7 @@ public final class AgentOperationActivity extends AppCompatActivity
             .setMessage(R.string.agent_operation_cancel_message)
             .setPositiveButton(android.R.string.ok, (d, w) -> {
                 finished = true;
-                runOnPool(() -> {
-                    killTerminalSession();
-                    cleanupVM();
-                });
+                runOnPool(this::cleanupVM);
                 finish();
             })
             .setNegativeButton(android.R.string.cancel, null)
@@ -410,11 +484,33 @@ public final class AgentOperationActivity extends AppCompatActivity
     protected void onDestroy() {
         super.onDestroy();
         if (!finished) {
-            runOnPool(() -> {
-                killTerminalSession();
-                cleanupVM();
+            runOnPool(this::cleanupVM);
+        }
+        mainHandler.removeCallbacksAndMessages(null);
+        if (agentRoot != null) {
+            agentRoot.getViewTreeObserver().removeOnGlobalLayoutListener(globalLayoutListener);
+            agentRoot = null;
+        }
+        if (terminalView != null) {
+            terminalView.removeJavascriptInterface("DroidVMConsole");
+            terminalView.destroy();
+            terminalView = null;
+        }
+    }
+
+    private final class ConsoleBridge {
+        @JavascriptInterface
+        public void onReady() {
+            mainHandler.post(() -> {
+                terminalReady = true;
+                flushPendingOutput();
+                mainHandler.postDelayed(fitRunnable, 50);
             });
+        }
+
+        @JavascriptInterface
+        public void onResize(int cols, int rows) {
+            Log.d(TAG, fmt("Terminal resized to %dx%d", cols, rows));
         }
     }
 }
-
