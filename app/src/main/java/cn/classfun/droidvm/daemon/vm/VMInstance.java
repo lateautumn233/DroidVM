@@ -42,7 +42,7 @@ public final class VMInstance extends VMConfig {
     private BackendBase backend;
     private VMBackendInstance backendInstance;
     private Thread workerThread;
-    private VMPortForwarder portForwarder;
+    private volatile VMPortForwarder portForwarder;
     private final VMInstanceStore store;
 
     public interface VMEventCallback {

@@ -1,7 +1,6 @@
 package cn.classfun.droidvm.daemon.vm;
 
 import static cn.classfun.droidvm.lib.utils.StringUtils.fmt;
-import static cn.classfun.droidvm.lib.utils.ThreadUtils.threadSleep;
 
 import android.util.Log;
 
@@ -74,6 +73,7 @@ final class VMPortForwarder {
 
     synchronized void stop() {
         running = false;
+        notifyAll();
         var t = thread;
         if (t != null) {
             t.interrupt();
@@ -105,52 +105,56 @@ final class VMPortForwarder {
     /**
      * 运行时热同步当前配置：
      * <ul>
-     *   <li>已在转发（VM 启动时已有规则）→ {@link #reapply()} 做增量 diff；</li>
+     *   <li>已在转发（VM 启动时已有规则）→ 唤醒轮询线程，由它持 {@code this} 重新对账；</li>
      *   <li>此前因无规则未启动 → {@link #start()} 按新配置启动轮询应用。</li>
      * </ul>
+     * 对账统一在轮询线程内完成（单写者），避免与 {@link #loop()} 并发改 {@link #applied} 产生竞态；
+     * {@code notifyAll} 与 {@code wait} 同持 {@code this} 监视器，保证轮询线程能可见 {@code item} 的最新配置。
      * 供 {@link VMInstance#applyPortForwards} 在运行时改规则后调用。
      */
     synchronized void sync() {
-        if (running) reapply();
+        if (running) notifyAll();
         else start();
     }
 
     /**
-     * 运行时热更新：基于 VM 当前 {@code port_forwards} 配置对已应用规则做增量 diff——
-     * 移除不再需要的、应用新增的。仅在 VM 运行（已 {@link #start()}）时有效。
-     * 新增规则要求 guest IP 当前可解析（运行中 VM 一般已联网，故可解析）。
+     * 以 VM 当前 {@code port_forwards} 配置为准，对已下发规则做一次增量对账：
+     * 撤销已删除/已改 host 端的规则、下发新增或新解析出的规则、切换改了 target 的规则。
+     * 对「配置仍在但此刻解析不出 guest IP」的 host 绑定保留其旧条目，待解析成功后在第 2 步原子切换，
+     * 避免热改 guest_ip/网卡时把原本正常的转发误删（旧路径 reapply 先删后加、无重试会丢规则）。
+     * 仅由轮询线程在持 {@code this} 时调用，是 {@link #applied} 的唯一写入者（除 {@link #stop()} 清理）。
+     *
+     * @return 是否仍有「已配置但当前无法解析 guest IP」的规则，调用方据此决定是否继续轮询重试。
      */
-    private synchronized void reapply() {
-        if (!running || networkStore == null) return;
+    private boolean reconcile() {
+        if (!running || networkStore == null) return false;
         var rules = parseRules();
         // 锁外解析目标，避免持 applied 锁期间做 DHCP/邻居表查询
         var desired = new ArrayList<Applied>();
+        boolean hasUnresolved = false;
         for (var rule : rules) {
             var target = resolveTarget(rule);
             if (target == null) {
-                Log.w(TAG, fmt("VM %s: reapply skipped unresolved %s :%d (guest IP not ready)",
-                    vm.getName(), rule.protocol, rule.hostPort));
+                hasUnresolved = true;
                 continue;
             }
             desired.add(new Applied(target.bridge, target.ip, rule.protocol,
                 rule.hostIp, rule.hostPort, rule.guestPort));
         }
         synchronized (applied) {
+            // 1. 撤销：与某条 desired 完全一致 → 保留；host 绑定仍在配置中（仅暂时解析不出）
+            //    → 保留旧条目，待第 2 步解析成功后切换；否则（规则被删/禁用/改了 host 端）→ removeForward
             applied.removeIf(a -> {
-                boolean keep = false;
                 for (var d : desired)
-                    if (sameForward(a, d)) {
-                        keep = true;
-                        break;
-                    }
-                if (!keep) {
-                    networkStore.firewall.removeForward(
-                        a.bridge, a.guestIp, a.protocol, a.hostIp, a.hostPort, a.guestPort);
-                    Log.i(TAG, fmt("VM %s: reapply removed %s :%d -> %s:%d",
-                        vm.getName(), a.protocol, a.hostPort, a.guestIp, a.guestPort));
-                }
-                return !keep;
+                    if (sameForward(a, d)) return false;
+                if (hostBindingConfigured(a, rules)) return false;
+                networkStore.firewall.removeForward(
+                    a.bridge, a.guestIp, a.protocol, a.hostIp, a.hostPort, a.guestPort);
+                Log.i(TAG, fmt("VM %s: removed forward %s :%d -> %s:%d",
+                    vm.getName(), a.protocol, a.hostPort, a.guestIp, a.guestPort));
+                return true;
             });
+            // 2. 下发 desired 中尚未生效的；若同 host 绑定已有旧 target，先撤旧再下发新（原子切换）
             for (var d : desired) {
                 boolean exists = false;
                 for (var a : applied)
@@ -159,18 +163,27 @@ final class VMPortForwarder {
                         break;
                     }
                 if (exists) continue;
+                applied.removeIf(a -> {
+                    if (!sameHostBinding(a, d)) return false;
+                    networkStore.firewall.removeForward(
+                        a.bridge, a.guestIp, a.protocol, a.hostIp, a.hostPort, a.guestPort);
+                    Log.i(TAG, fmt("VM %s: switched forward %s :%d off %s:%d",
+                        vm.getName(), a.protocol, a.hostPort, a.guestIp, a.guestPort));
+                    return true;
+                });
                 boolean ok = networkStore.firewall.applyForward(
                     d.bridge, d.guestIp, d.protocol, d.hostIp, d.hostPort, d.guestPort);
                 if (ok) {
                     applied.add(d);
-                    Log.i(TAG, fmt("VM %s: reapply added %s :%d -> %s:%d",
+                    Log.i(TAG, fmt("VM %s: forward %s :%d -> %s:%d",
                         vm.getName(), d.protocol, d.hostPort, d.guestIp, d.guestPort));
                 } else {
-                    Log.w(TAG, fmt("VM %s: reapply failed to apply %s :%d",
+                    Log.w(TAG, fmt("VM %s: failed to apply forward %s :%d",
                         vm.getName(), d.protocol, d.hostPort));
                 }
             }
         }
+        return hasUnresolved;
     }
 
     private static boolean sameForward(@NonNull Applied a, @NonNull Applied b) {
@@ -182,54 +195,54 @@ final class VMPortForwarder {
             && eq(a.bridge, b.bridge);
     }
 
+    /**
+     * 两条已下发规则是否共享同一 host 绑定 (protocol, host_ip, host_port)——即 DNAT 入口。
+     * 用于「target 变更」的原子切换：同入口、不同 target 时先撤旧再下发新。
+     */
+    private static boolean sameHostBinding(@NonNull Applied a, @NonNull Applied b) {
+        return a.protocol.equals(b.protocol) && a.hostPort == b.hostPort && eq(a.hostIp, b.hostIp);
+    }
+
+    /** 已下发规则 a 的 host 绑定是否仍存在于当前配置（即便此刻解析不出 guest IP）。 */
+    private static boolean hostBindingConfigured(@NonNull Applied a, @NonNull List<Rule> rules) {
+        for (var r : rules)
+            if (a.protocol.equals(r.protocol) && a.hostPort == r.hostPort && eq(a.hostIp, r.hostIp))
+                return true;
+        return false;
+    }
+
     private static boolean eq(@Nullable String a, @Nullable String b) {
         return a == null ? b == null : a.equals(b);
     }
 
+    /**
+     * 轮询线程主体：持 {@code this} 反复 {@link #reconcile()}（每轮重新读取配置，故删除/修改即时可见）。
+     * 全部规则解析完成后 {@code wait()} 休眠，由 {@link #sync()}/{@link #stop()} 唤醒；仍有未解析规则时
+     * 限时等待后重试，超过 {@link #RESOLVE_MAX_ATTEMPTS} 次转为休眠（下次配置变更会再唤醒并重置重试）。
+     * 线程在整个 RUNNING 期间存活，避免「线程退出后又来新规则却无人轮询」的窗口。
+     */
     private void loop() {
-        var rules = parseRules();
-        if (rules.isEmpty()) return;
-        int attempts = 0;
-        while (running && vm.getState() == VMState.RUNNING) {
-            boolean allDone = true;
-            for (var rule : rules) {
-                if (rule.done) continue;
-                if (!running) return;
-                var target = resolveTarget(rule);
-                if (target == null) {
-                    allDone = false;
-                    continue;
-                }
-                boolean ok = networkStore.firewall.applyForward(
-                    target.bridge, target.ip, rule.protocol,
-                    rule.hostIp, rule.hostPort, rule.guestPort);
-                rule.done = true;
-                if (!ok) {
-                    Log.w(TAG, fmt("VM %s: failed to apply forward %s :%d -> %s:%d",
-                        vm.getName(), rule.protocol, rule.hostPort, target.ip, rule.guestPort));
-                    continue;
-                }
-                // 与 stop()/removeAll() 通过 applied 锁互斥，避免 stop 后仍残留规则
-                synchronized (applied) {
-                    if (!running) {
-                        networkStore.firewall.removeForward(
-                            target.bridge, target.ip, rule.protocol,
-                            rule.hostIp, rule.hostPort, rule.guestPort);
+        try {
+            int attempts = 0;
+            synchronized (this) {
+                while (running && vm.getState() == VMState.RUNNING) {
+                    boolean hasUnresolved = reconcile();
+                    if (!running) break;
+                    if (hasUnresolved && attempts < RESOLVE_MAX_ATTEMPTS) {
+                        attempts++;
+                        wait(RESOLVE_INTERVAL_MS);
                     } else {
-                        applied.add(new Applied(target.bridge, target.ip, rule.protocol,
-                            rule.hostIp, rule.hostPort, rule.guestPort));
-                        Log.i(TAG, fmt("VM %s: forward %s :%d -> %s:%d",
-                            vm.getName(), rule.protocol, rule.hostPort, target.ip, rule.guestPort));
+                        if (hasUnresolved)
+                            Log.w(TAG, fmt("VM %s: gave up auto-resolving guest IP for some port"
+                                    + " forwards after %d attempts; will retry on next config change",
+                                vm.getName(), attempts));
+                        attempts = 0;
+                        wait();
                     }
                 }
             }
-            if (allDone) break;
-            if (++attempts >= RESOLVE_MAX_ATTEMPTS) {
-                Log.w(TAG, fmt("VM %s: gave up resolving guest IP for some port forwards after %d attempts",
-                    vm.getName(), attempts));
-                break;
-            }
-            threadSleep(RESOLVE_INTERVAL_MS);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -370,7 +383,6 @@ final class VMPortForwarder {
         int guestPort;
         String networkId;
         String fixedGuestIp;
-        boolean done = false;
     }
 
     private static final class Target {
