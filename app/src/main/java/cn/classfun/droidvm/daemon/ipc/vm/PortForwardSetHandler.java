@@ -13,12 +13,7 @@ import cn.classfun.droidvm.daemon.server.ClientRequest;
 import cn.classfun.droidvm.daemon.server.RequestException;
 import cn.classfun.droidvm.daemon.server.RequestHandler;
 
-/**
- * 运行时热更新某个 VM 的端口转发规则。
- * 参数：{@code vm_id}、{@code rules}（端口转发规则数组，契约同 {@code port_forwards} 字段）。
- * 收到后更新该 VM 的内存配置并即时同步 iptables，返回当前生效的转发列表。
- * 配置的持久化由前端负责（写共享 vms.json）。
- */
+/** IPC: hot-applies {@code rules} to a running VM ({@code vm_id}); the frontend owns persistence. */
 @AutoService(RequestHandler.class)
 public final class PortForwardSetHandler extends RequestHandler {
     @NonNull

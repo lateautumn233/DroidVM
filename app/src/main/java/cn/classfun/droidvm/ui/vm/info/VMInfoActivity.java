@@ -361,7 +361,7 @@ public final class VMInfoActivity extends AppCompatActivity implements Foregroun
             var guestIp = o.optString("guest_ip", "");
             var guestPort = o.optInt("guest_port", 0);
             var hostDisplay = (hostIp.isEmpty() ? "*" : hostIp) + ":" + hostPort;
-            var line = proto + "  " + hostDisplay + " → " + guestIp + ":" + guestPort;
+            var line = proto + "  " + hostDisplay + " -> " + guestIp + ":" + guestPort;
             var row = inflater.inflate(
                 R.layout.item_port_forward_active, containerPortForwards, false);
             ((TextView) row.findViewById(R.id.tv_pf_line)).setText(line);
@@ -369,7 +369,6 @@ public final class VMInfoActivity extends AppCompatActivity implements Foregroun
         }
     }
 
-    /** 运行时热编辑端口转发：弹出复用编辑页的列表，应用后即时下发到 daemon 并持久化。 */
     private void showPortForwardEditor() {
         if (config == null) return;
         var view = LayoutInflater.from(this).inflate(R.layout.dialog_port_forward_edit, null);
@@ -382,7 +381,7 @@ public final class VMInfoActivity extends AppCompatActivity implements Foregroun
             .setPositiveButton(R.string.edit_vm_pf_apply, null)
             .setNegativeButton(android.R.string.cancel, null)
             .create();
-        // 自行接管确认按钮：校验不通过时保留对话框，避免已编辑内容丢失
+        // Override the button so failed validation keeps the dialog open.
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
             .setOnClickListener(v -> {
                 if (applyPortForwardEdits(list)) dialog.dismiss();
@@ -390,7 +389,6 @@ public final class VMInfoActivity extends AppCompatActivity implements Foregroun
         dialog.show();
     }
 
-    /** 校验→更新前端配置并持久化→热下发 vm_port_forward_set→延迟刷新活跃列表。返回是否成功提交。 */
     private boolean applyPortForwardEdits(CardItemListView list) {
         var items = list.getItems();
         if (items == null) items = DataItem.newArray();
@@ -410,7 +408,7 @@ public final class VMInfoActivity extends AppCompatActivity implements Foregroun
             .put("vm_id", vmId.toString())
             .put("rules", rules)
             .onResponse(r -> {
-                // reapply 同步生效、loop 启动异步生效——立即刷新一次 + 延迟再刷一次
+                // Apply may take effect sync (reconcile) or async (loop start); refresh now and after a delay.
                 mainHandler.post(this::refreshPortForwards);
                 mainHandler.postDelayed(this::refreshPortForwards, 1500);
             })
@@ -421,7 +419,7 @@ public final class VMInfoActivity extends AppCompatActivity implements Foregroun
         return true;
     }
 
-    /** 深拷贝端口转发数组（JSON 往返），供对话框编辑，避免取消时污染 config。 */
+    /** Deep copy so a cancelled dialog doesn't mutate config. */
     private static DataItem copyArray(DataItem src) {
         if (!src.is(DataItem.Type.ARRAY)) return DataItem.newArray();
         try {

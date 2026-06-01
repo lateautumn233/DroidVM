@@ -41,7 +41,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
         var item = items.get(position);
         holder.unbindWatchers();
 
-        // 协议（tcp/udp）
         holder.btnProtocol.configure(
             PortProtocol.class, Enums.optEnum(item, "protocol", PortProtocol.TCP));
         holder.btnProtocol.setOnValueChangedListener((oldVal, newVal) -> {
@@ -50,7 +49,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
                 items.get(pos).set("protocol", newVal);
         });
 
-        // 主机端口
         long hostPort = item.optLong("host_port", 0);
         holder.etHostPort.setText(hostPort > 0 ? String.valueOf(hostPort) : "");
         holder.hostPortWatcher = SimpleTextWatcher.simpleAfterTextWatcher(s -> {
@@ -60,7 +58,7 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
         });
         holder.etHostPort.addTextChangedListener(holder.hostPortWatcher);
 
-        // Guest 端口（留空=与主机端口相同，由后端回退）
+        // Guest port (empty = same as host port, backend falls back)
         long guestPort = item.optLong("guest_port", 0);
         holder.etGuestPort.setText(guestPort > 0 ? String.valueOf(guestPort) : "");
         holder.guestPortWatcher = SimpleTextWatcher.simpleAfterTextWatcher(s -> {
@@ -70,7 +68,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
         });
         holder.etGuestPort.addTextChangedListener(holder.guestPortWatcher);
 
-        // 启用开关
         holder.switchEnabled.setOnCheckedChangeListener(null);
         holder.switchEnabled.setChecked(item.optBoolean("enabled", true));
         holder.switchEnabled.setOnCheckedChangeListener((btn, checked) -> {
@@ -79,7 +76,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
                 items.get(pos).set("enabled", checked);
         });
 
-        // 高级：主机 IP
         holder.etHostIp.setText(item.optString("host_ip", ""));
         holder.hostIpWatcher = SimpleTextWatcher.simpleAfterTextWatcher(s -> {
             int pos = holder.getBindingAdapterPosition();
@@ -88,7 +84,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
         });
         holder.etHostIp.addTextChangedListener(holder.hostIpWatcher);
 
-        // 高级：Guest IP
         holder.etGuestIp.setText(item.optString("guest_ip", ""));
         holder.guestIpWatcher = SimpleTextWatcher.simpleAfterTextWatcher(s -> {
             int pos = holder.getBindingAdapterPosition();
@@ -97,7 +92,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
         });
         holder.etGuestIp.addTextChangedListener(holder.guestIpWatcher);
 
-        // 高级：网卡选择
         updateNetworkButton(holder.btnNetwork, item.optString("network_id", ""));
         holder.btnNetwork.setOnClickListener(v -> {
             int pos = holder.getBindingAdapterPosition();
@@ -105,7 +99,7 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
                 showNetworkPicker(pos, holder.btnNetwork);
         });
 
-        // 高级区展开状态：有高级值时默认展开（数据驱动，复用安全）
+        // Advanced section expand state: expanded by default when advanced values exist (data-driven, safe to reuse)
         boolean hasAdvanced = !item.optString("host_ip", "").isEmpty()
             || !item.optString("guest_ip", "").isEmpty()
             || !item.optString("network_id", "").isEmpty();
@@ -115,7 +109,6 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
             applyAdvancedState(holder, show);
         });
 
-        // 删除
         holder.btnDelete.setOnClickListener(v -> {
             int pos = holder.getBindingAdapterPosition();
             if (pos != RecyclerView.NO_POSITION)
@@ -129,7 +122,7 @@ public final class PortForwardEditAdapter extends CardItemAdapter<PortForwardEdi
             expanded ? R.drawable.ic_expand_less : R.drawable.ic_expand_more);
     }
 
-    /** 端口以整数类型写入；空/非法记为 0（后端：host_port=0 跳过，guest_port=0 回退 host_port）。 */
+    /** Writes the port as an integer; empty/invalid becomes 0 (backend: host_port=0 is skipped, guest_port=0 falls back to host_port). */
     private void setPort(@NonNull DataItem item, @NonNull String key, @NonNull String text) {
         text = text.trim();
         if (text.isEmpty()) {

@@ -22,20 +22,8 @@ import cn.classfun.droidvm.lib.store.base.DataItem;
 import cn.classfun.droidvm.lib.store.vm.VMState;
 
 /**
- * 管理单个 VM 的端口转发（host -> guest）iptables DNAT 规则。
- * VM 进入 RUNNING 后启动：轮询 DHCP 租约/邻居表，按网卡 MAC 解析 guest IP，
- * 然后下发规则；VM 退出时撤销全部已下发的规则。
- *
- * <p>规则来源于 VM 配置的 {@code port_forwards} 数组，每项字段：
- * <ul>
- *   <li>{@code protocol}: tcp | udp（默认 tcp）</li>
- *   <li>{@code host_port}: 宿主机监听端口（必填）</li>
- *   <li>{@code guest_port}: guest 目标端口（默认与 host_port 相同）</li>
- *   <li>{@code host_ip}: 可选，仅转发发往该宿主地址的流量；留空=全部</li>
- *   <li>{@code network_id}: 可选，多网卡时指定走哪个网卡；留空=首个网卡</li>
- *   <li>{@code guest_ip}: 可选，手动指定 guest IP，跳过自动发现</li>
- *   <li>{@code enabled}: 可选，默认 true</li>
- * </ul>
+ * Installs host -> guest iptables DNAT rules for one VM's {@code port_forwards}, resolving the
+ * guest IP from DHCP leases / the neighbor table while the VM is RUNNING.
  */
 final class VMPortForwarder {
     private static final String TAG = "VMPortForwarder";
@@ -102,34 +90,24 @@ final class VMPortForwarder {
         return arr;
     }
 
-    /**
-     * 运行时热同步当前配置：
-     * <ul>
-     *   <li>已在转发（VM 启动时已有规则）→ 唤醒轮询线程，由它持 {@code this} 重新对账；</li>
-     *   <li>此前因无规则未启动 → {@link #start()} 按新配置启动轮询应用。</li>
-     * </ul>
-     * 对账统一在轮询线程内完成（单写者），避免与 {@link #loop()} 并发改 {@link #applied} 产生竞态；
-     * {@code notifyAll} 与 {@code wait} 同持 {@code this} 监视器，保证轮询线程能可见 {@code item} 的最新配置。
-     * 供 {@link VMInstance#applyPortForwards} 在运行时改规则后调用。
-     */
+    /** Wakes the poll thread (or starts it) so reconcile always runs on that single thread. */
     synchronized void sync() {
         if (running) notifyAll();
         else start();
     }
 
     /**
-     * 以 VM 当前 {@code port_forwards} 配置为准，对已下发规则做一次增量对账：
-     * 撤销已删除/已改 host 端的规则、下发新增或新解析出的规则、切换改了 target 的规则。
-     * 对「配置仍在但此刻解析不出 guest IP」的 host 绑定保留其旧条目，待解析成功后在第 2 步原子切换，
-     * 避免热改 guest_ip/网卡时把原本正常的转发误删（旧路径 reapply 先删后加、无重试会丢规则）。
-     * 仅由轮询线程在持 {@code this} 时调用，是 {@link #applied} 的唯一写入者（除 {@link #stop()} 清理）。
+     * Incrementally reconciles installed rules to the current config. Poll-thread only and the
+     * sole writer of {@link #applied} (besides {@link #stop()}). A still-configured binding whose
+     * guest IP is momentarily unresolvable keeps its old entry and is switched atomically once
+     * resolvable, so hot-editing guest_ip/NIC never drops a working forward.
      *
-     * @return 是否仍有「已配置但当前无法解析 guest IP」的规则，调用方据此决定是否继续轮询重试。
+     * @return whether any rule is still configured-but-unresolvable (keep polling).
      */
     private boolean reconcile() {
         if (!running || networkStore == null) return false;
         var rules = parseRules();
-        // 锁外解析目标，避免持 applied 锁期间做 DHCP/邻居表查询
+        // Resolve outside the applied lock; DHCP / neighbor lookups are slow.
         var desired = new ArrayList<Applied>();
         boolean hasUnresolved = false;
         for (var rule : rules) {
@@ -142,8 +120,6 @@ final class VMPortForwarder {
                 rule.hostIp, rule.hostPort, rule.guestPort));
         }
         synchronized (applied) {
-            // 1. 撤销：与某条 desired 完全一致 → 保留；host 绑定仍在配置中（仅暂时解析不出）
-            //    → 保留旧条目，待第 2 步解析成功后切换；否则（规则被删/禁用/改了 host 端）→ removeForward
             applied.removeIf(a -> {
                 for (var d : desired)
                     if (sameForward(a, d)) return false;
@@ -154,7 +130,6 @@ final class VMPortForwarder {
                     vm.getName(), a.protocol, a.hostPort, a.guestIp, a.guestPort));
                 return true;
             });
-            // 2. 下发 desired 中尚未生效的；若同 host 绑定已有旧 target，先撤旧再下发新（原子切换）
             for (var d : desired) {
                 boolean exists = false;
                 for (var a : applied)
@@ -195,15 +170,10 @@ final class VMPortForwarder {
             && eq(a.bridge, b.bridge);
     }
 
-    /**
-     * 两条已下发规则是否共享同一 host 绑定 (protocol, host_ip, host_port)——即 DNAT 入口。
-     * 用于「target 变更」的原子切换：同入口、不同 target 时先撤旧再下发新。
-     */
     private static boolean sameHostBinding(@NonNull Applied a, @NonNull Applied b) {
         return a.protocol.equals(b.protocol) && a.hostPort == b.hostPort && eq(a.hostIp, b.hostIp);
     }
 
-    /** 已下发规则 a 的 host 绑定是否仍存在于当前配置（即便此刻解析不出 guest IP）。 */
     private static boolean hostBindingConfigured(@NonNull Applied a, @NonNull List<Rule> rules) {
         for (var r : rules)
             if (a.protocol.equals(r.protocol) && a.hostPort == r.hostPort && eq(a.hostIp, r.hostIp))
@@ -215,12 +185,7 @@ final class VMPortForwarder {
         return a == null ? b == null : a.equals(b);
     }
 
-    /**
-     * 轮询线程主体：持 {@code this} 反复 {@link #reconcile()}（每轮重新读取配置，故删除/修改即时可见）。
-     * 全部规则解析完成后 {@code wait()} 休眠，由 {@link #sync()}/{@link #stop()} 唤醒；仍有未解析规则时
-     * 限时等待后重试，超过 {@link #RESOLVE_MAX_ATTEMPTS} 次转为休眠（下次配置变更会再唤醒并重置重试）。
-     * 线程在整个 RUNNING 期间存活，避免「线程退出后又来新规则却无人轮询」的窗口。
-     */
+    /** Reconcile/wait loop; stays alive the whole RUNNING period so late rule changes are still reconciled. */
     private void loop() {
         try {
             int attempts = 0;
@@ -276,7 +241,6 @@ final class VMPortForwarder {
             if (guestPort <= 0 || guestPort > 65535) guestPort = hostPort;
             var hostIp = r.optString("host_ip", "");
             if (hostIp == null) hostIp = "";
-            // 同一 VM 内按 (protocol, host_ip, host_port) 去重，避免重复 DNAT
             var key = fmt("%s|%s|%d", protocol, hostIp, hostPort);
             if (!seen.add(key)) {
                 Log.w(TAG, fmt("VM %s: duplicate port forward %s, skipping", vm.getName(), key));
@@ -317,10 +281,8 @@ final class VMPortForwarder {
     private String resolveGuestIpByMac(
         @NonNull NetworkInstance netInst, @NonNull String bridge, @NonNull String mac) {
         var macLower = mac.toLowerCase(Locale.ROOT);
-        // 1. 优先用 dnsmasq DHCP 租约
         var ip = matchMac(networkStore.backend.listDhcpLeases(bridge), macLower, "ip", "mac");
         if (ip != null) return ip;
-        // 2. 回退到 ARP 邻居表（适用于静态 IP 且已通信过的 guest）
         return matchMac(netInst.listNeighbors(), macLower, "dst", "lladdr");
     }
 

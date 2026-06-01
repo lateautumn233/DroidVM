@@ -46,11 +46,7 @@ public final class VMEditPortForwardTab extends VMEditBaseTab {
         return true;
     }
 
-    /**
-     * 校验端口转发规则（与后端 VMPortForwarder.parseRules 对齐，仅校验启用项）：
-     * host_port 必填 1-65535；guest_port 为 0（后端回退 host_port）或 1-65535。
-     * 供编辑页与详情页运行时热编辑复用。
-     */
+    /** Mirrors the backend VMPortForwarder.parseRules checks (enabled rules only). */
     public static boolean rulesValid(@NonNull DataItem rules) {
         for (var iter : rules) {
             var r = iter.getValue();
@@ -58,7 +54,7 @@ public final class VMEditPortForwardTab extends VMEditBaseTab {
             long hostPort = r.optLong("host_port", 0);
             if (hostPort <= 0 || hostPort > 65535) return false;
             long guestPort = r.optLong("guest_port", 0);
-            if (guestPort > 65535) return false; // 0 合法：后端回退为 host_port
+            if (guestPort > 65535) return false; // 0 is valid: backend falls back to host_port
         }
         return true;
     }

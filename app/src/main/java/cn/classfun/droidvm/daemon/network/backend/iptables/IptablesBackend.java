@@ -173,10 +173,7 @@ public final class IptablesBackend extends FirewallHelper {
         };
     }
 
-    /**
-     * 判断 host_ip 是否为具体地址；通配（空 / 0.0.0.0 / 0.0.0.0/0 / :: / ::/0）
-     * 表示"所有目标地址"，此时不应加 -d，否则会精确匹配该地址导致 DNAT 永不命中。
-     */
+    /** A wildcard host_ip (empty / 0.0.0.0[/0] / ::[/0]) must omit -d, or the DNAT never matches. */
     private static boolean isSpecificHost(@Nullable String hostIp) {
         return hostIp != null && !hostIp.isEmpty()
             && !hostIp.equals("0.0.0.0") && !hostIp.equals("0.0.0.0/0")
